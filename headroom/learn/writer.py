@@ -25,8 +25,7 @@ from .models import (
 # Marker delimiters for Headroom-managed sections. The pattern spans from the
 # first start marker to the LAST end marker, and everything written between
 # them goes through sanitize_block_text() first, so transcript-derived content
-# can neither close the block early nor hide text from the reader — see
-# headroom.managed_block for the threat this closes.
+# cannot close the block early (see headroom.managed_block).
 _MARKER_START = "<!-- headroom:learn:start -->"
 _MARKER_END = "<!-- headroom:learn:end -->"
 _MARKER_PATTERN = block_pattern(_MARKER_START, _MARKER_END)
@@ -104,13 +103,11 @@ def _build_section(recommendations: list[Recommendation]) -> str:
 
     for rec in recommendations:
         # Section names and bodies come from transcript-derived analysis (tool
-        # output, error text, user messages). Neutralise anything that could
-        # close our markers, hide text, or forge a "### " section heading.
-        section = " ".join(sanitize_block_text(rec.section).split()) or "Learned pattern"
-        lines.append(f"### {section}")
+        # output, error text, user messages): they must not close our markers.
+        lines.append(f"### {sanitize_block_text(rec.section)}")
         if rec.estimated_tokens_saved > 0:
             lines.append(f"*~{rec.estimated_tokens_saved:,} tokens/session saved*")
-        lines.append(sanitize_block_text(rec.content, escape_headings=True))
+        lines.append(sanitize_block_text(rec.content))
         lines.append("")
 
     lines.append(_MARKER_END)
