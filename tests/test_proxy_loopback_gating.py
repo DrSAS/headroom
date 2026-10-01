@@ -747,15 +747,14 @@ def test_dashboard_client_cidr_does_not_expand_other_management_endpoints(
     assert client.post("/stats/reset").status_code == 404
 
 
-# ─────────────── read-only telemetry routes and the dashboard shell ─────────
+# ─────────────────────── read-only telemetry routes ─────────────────────────
 # These carried operator data (model/project/session labels, spend history,
-# subscription utilisation, provider quota, the dashboard UI itself) to any
-# network caller. They now share the /settings* trust chain: loopback or a
-# trusted dashboard client behind a gateway; everyone else sees 404.
+# subscription utilisation, provider quota) to any network caller. They now
+# share the /settings* trust chain: loopback or a trusted dashboard client
+# behind a gateway; everyone else sees 404. The dashboard shell is a static
+# template and stays reachable.
 
 DASHBOARD_GATED = [
-    ("get", "/dashboard"),
-    ("get", "/dashboard/"),
     ("get", "/stats-history"),
     ("get", "/stats-history?format=csv"),
     ("get", "/quota"),
@@ -805,6 +804,28 @@ def test_dashboard_routes_token_authenticated_operator_allowed(
     assert wrong.status_code == 401
     ok = network.request(method, path, headers={"Authorization": "Bearer s3cr3t-token"})
     assert ok.status_code not in (401, 404), ok.text
+
+
+@pytest.mark.parametrize("path", ["/stats-history", "/quota", "/metrics"])
+def test_token_does_not_exempt_a_loopback_peer_from_the_host_check(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """The gate waves loopback peers through without a token, so a configured
+    token must not short-cut the DNS-rebinding defence for them."""
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "s3cr3t-token")
+    app = _make_app()
+    local = TestClient(app, base_url="http://127.0.0.1:8787", client=("127.0.0.1", 1))
+    assert local.get(path).status_code != 404
+    rebound = TestClient(app, base_url="http://attacker.example", client=("127.0.0.1", 1))
+    assert rebound.get(path).status_code == 404
+
+
+def test_dashboard_shell_is_not_gated() -> None:
+    """Static template, no operator data: a container published on host loopback
+    (peer = bridge gateway, Host = localhost) must still load it."""
+    client = TestClient(_make_app(), base_url="http://localhost:8787", client=("172.17.0.1", 1))
+    assert client.get("/dashboard").status_code == 200
+    assert client.get("/stats-history").status_code == 404
 
 
 def test_stats_history_csv_export_not_served_to_network_callers() -> None:

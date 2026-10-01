@@ -4001,18 +4001,26 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         if not _request_can_view_dashboard_metadata(request, trusted_dashboard_client_cidrs):
             raise HTTPException(status_code=404)
 
-    def _require_operator_read_client(request: Request) -> None:
-        """Gate the read-only operator routes (dashboard shell, history, quota).
+    def _authenticated_at_gate(request: Request) -> bool:
+        """True when the security gate verified this request's proxy token.
 
-        When an inbound token is configured, any non-loopback request that
-        reaches a handler has already authenticated at the security gate, and
-        a token-holding operator on a public bind is entitled to the dashboard
-        (the docker-bind e2e asserts exactly that: correct token → 200).
-        Without a token these routes fall back to the /settings* trust chain:
-        loopback, or a trusted dashboard client behind a gateway. Settings
-        *writes* deliberately do not get the token short-cut.
+        The gate exempts loopback peers without checking the ``Host`` header,
+        so only a *non-loopback* request that reached a handler while a token
+        is configured has proven it holds the token. A loopback peer must
+        still pass the loopback (peer + Host) check: the DNS-rebinding defence.
         """
-        if _proxy_token:
+        client = getattr(request, "client", None)
+        return bool(_proxy_token) and not is_loopback_host(getattr(client, "host", None))
+
+    def _require_operator_read_client(request: Request) -> None:
+        """Gate the read-only operator routes (history, quota, subscription window).
+
+        A token-authenticated operator on a public bind is entitled to them.
+        Everyone else falls back to the /settings* trust chain: loopback, or a
+        trusted dashboard client behind a gateway. Settings *writes*
+        deliberately do not get the token short-cut.
+        """
+        if _authenticated_at_gate(request):
             return
         _require_loopback_or_trusted_dashboard_client(request)
 
@@ -4022,9 +4030,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         ``/metrics`` is a Prometheus target, so unlike the dashboard routes it
         cannot require an IP-literal ``Host`` header. Allowed callers:
 
-        * any caller when an inbound token is configured — non-loopback
-          requests reaching this handler have already authenticated at the
-          security gate;
+        * a non-loopback caller that authenticated at the security gate;
         * loopback (peer *and* Host header, the usual two gates);
         * a peer inside ``HEADROOM_PROXY_TRUSTED_GATEWAY_CIDRS`` or the
           dashboard-client CIDRs, provided any browser provenance it carries
@@ -4032,7 +4038,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
 
         Everyone else gets the same 404 the other operator routes return.
         """
-        if _proxy_token:
+        if _authenticated_at_gate(request):
             return
         if _request_is_loopback(request):
             return
@@ -4231,20 +4237,17 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         name="dashboard-static",
     )
 
-    # The dashboard shell and every read-only telemetry route below carry
-    # operator data (model/project/session labels, spend history, subscription
-    # utilisation, provider quota) and were served to any network caller. They
-    # now answer token-authenticated operators, loopback, or a trusted
-    # dashboard client behind a gateway. Other network callers get 404.
+    # The read-only telemetry routes below carry operator data (model/project/
+    # session labels, spend history, subscription utilisation, provider quota)
+    # and were served to any network caller. They now answer token-authenticated
+    # operators, loopback, or a trusted dashboard client behind a gateway; other
+    # network callers get 404. The dashboard shell itself is a static template
+    # (like its /dashboard/static assets) and stays reachable, so a container
+    # published on host loopback, whose peer is the bridge gateway, still loads.
     _dashboard_gate = [Depends(_require_operator_read_client)]
 
-    @app.get("/dashboard", response_class=HTMLResponse, dependencies=_dashboard_gate)
-    @app.get(
-        "/dashboard/",
-        response_class=HTMLResponse,
-        include_in_schema=False,
-        dependencies=_dashboard_gate,
-    )
+    @app.get("/dashboard", response_class=HTMLResponse)
+    @app.get("/dashboard/", response_class=HTMLResponse, include_in_schema=False)
     async def dashboard():
         """Serve the Headroom dashboard UI."""
         return get_dashboard_html()
