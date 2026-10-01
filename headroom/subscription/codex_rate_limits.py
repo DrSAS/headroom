@@ -475,7 +475,7 @@ def maybe_schedule_usage_poll(
 
     The poll spends the *caller's* bearer, so it runs only when
     ``from_local_operator`` is true (the handler passes
-    :func:`headroom.subscription.credential_policy.may_adopt_caller_credential`).
+    :func:`headroom.subscription.credential_policy.is_local_operator_connection`).
     A network caller on a shared proxy never drives it (VAPT 01-F16).
     """
     if not from_local_operator:

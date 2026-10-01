@@ -7473,14 +7473,14 @@ class OpenAIHandlerMixin:
                     maybe_schedule_usage_poll,
                 )
                 from headroom.subscription.credential_policy import (
-                    may_adopt_caller_credential,
+                    is_local_operator_connection,
                 )
 
                 # The poll spends the caller's own bearer: local operator only
                 # (01-F16).
                 maybe_schedule_usage_poll(
                     ws_headers,
-                    from_local_operator=may_adopt_caller_credential(websocket),
+                    from_local_operator=is_local_operator_connection(websocket),
                 )
 
         try:

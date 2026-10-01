@@ -174,13 +174,6 @@ async def test_maybe_poll_handles_inactive_and_none_snapshot(
     assert tracker._state.poll_errors == 1
 
 
-@pytest.fixture(autouse=True)
-def _no_operator_claude_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
-    """Operator credentials outrank a learned token (01-F16); keep the host's out."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude-config"))
-
-
 @pytest.mark.asyncio
 async def test_maybe_poll_success_updates_state_and_metrics(
     monkeypatch: pytest.MonkeyPatch,

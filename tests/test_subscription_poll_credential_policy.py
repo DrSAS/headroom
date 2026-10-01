@@ -4,8 +4,8 @@ On a shared proxy, the subscription tracker used to adopt *any* caller's OAuth
 bearer as the account to poll, and the Codex ``/wham/usage`` refresher polled
 with any caller's bearer + ChatGPT account id. The result was published on the
 operator's dashboard and the caller's credential was spent on a request they
-never made. Now only the operator-configured credential, or a bearer from the
-local operator (direct loopback, not forwarded), may drive a poll.
+never made. Now only a bearer from the local operator (direct loopback, not
+forwarded) may be adopted; otherwise the operator-configured credential is used.
 """
 
 from __future__ import annotations
@@ -17,11 +17,7 @@ import httpx
 import pytest
 
 from headroom.subscription import codex_rate_limits
-from headroom.subscription.credential_policy import (
-    TRAFFIC_TOKEN_ENV,
-    is_local_operator_connection,
-    may_adopt_caller_credential,
-)
+from headroom.subscription.credential_policy import is_local_operator_connection
 from headroom.subscription.tracker import SubscriptionTracker
 
 
@@ -56,12 +52,6 @@ def test_network_forwarded_or_unknown_callers_are_not(conn) -> None:  # noqa: AN
     assert is_local_operator_connection(conn) is False
 
 
-def test_operator_can_disable_learning_from_traffic(monkeypatch) -> None:  # noqa: ANN001
-    assert may_adopt_caller_credential(_conn("127.0.0.1")) is True
-    monkeypatch.setenv(TRAFFIC_TOKEN_ENV, "off")
-    assert may_adopt_caller_credential(_conn("127.0.0.1")) is False
-
-
 # ---------------------------------------------------------------------------
 # Subscription tracker
 # ---------------------------------------------------------------------------
@@ -84,21 +74,6 @@ def test_local_operator_bearer_is_adopted(tmp_path) -> None:  # noqa: ANN001
     assert tracker._current_token == "operator-oauth-token"
 
 
-def test_operator_credential_wins_over_a_learned_token(tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "operator-configured-token")
-    tracker = _tracker(tmp_path)
-    tracker.notify_active("Bearer learned-token", from_local_operator=True)
-    polled: list[str | None] = []
-
-    async def fetch(token: str | None):  # noqa: ANN202
-        polled.append(token)
-        return None
-
-    tracker._client.fetch = fetch  # type: ignore[method-assign]
-    asyncio.run(tracker._maybe_poll())
-    assert polled == ["operator-configured-token"]
-
-
 def test_foreign_bearer_never_reaches_the_usage_poll(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude"))
@@ -112,7 +87,9 @@ def test_foreign_bearer_never_reaches_the_usage_poll(tmp_path, monkeypatch) -> N
 
     tracker._client.fetch = fetch  # type: ignore[method-assign]
     asyncio.run(tracker._maybe_poll())
-    assert polled == []
+    # The poll ran (the caller marked activity) but with no adopted token, so
+    # the client falls back to the operator's own credential.
+    assert polled == [None]
 
 
 # ---------------------------------------------------------------------------

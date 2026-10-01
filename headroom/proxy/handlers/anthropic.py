@@ -1249,14 +1249,14 @@ class AnthropicHandlerMixin:
                 _sub_tracker = _get_sub_tracker()
                 if _sub_tracker is not None:
                     from headroom.subscription.credential_policy import (
-                        may_adopt_caller_credential,
+                        is_local_operator_connection,
                     )
 
                     # Only the local operator's bearer may become the polled
                     # account; a network caller only marks activity (01-F16).
                     _sub_tracker.notify_active(
                         _auth_header,
-                        from_local_operator=may_adopt_caller_credential(request),
+                        from_local_operator=is_local_operator_connection(request),
                     )
 
             # Rate limiting
