@@ -25,10 +25,6 @@ The rule now:
 3. For an **untrusted** request (no token configured and a remote caller) the
    credential is ignored: the bucket is the peer. Rotating a header cannot mint
    a new bucket for someone the proxy cannot authenticate.
-
-The limiter (``TokenBucketRateLimiter``) keeps trusted and untrusted identities
-in separate bounded pools and caps how many buckets one owner can hold, so
-neither pool can be flushed by an attacker.
 """
 
 from __future__ import annotations
@@ -36,13 +32,10 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import secrets
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from headroom.proxy.forwarded_headers import load_trusted_gateway_cidrs, resolve_client_ip
 from headroom.proxy.loopback_guard import is_loopback_host
-
-RateLimitPool = Literal["trusted", "untrusted"]
 
 # Set by the security gate when a caller presented a valid HEADROOM_PROXY_TOKEN.
 PROXY_AUTHENTICATED_STATE_ATTR = "proxy_authenticated"
@@ -52,15 +45,6 @@ _CREDENTIAL_HEADERS = ("authorization", "x-api-key", "api-key", "x-goog-api-key"
 
 # Process-local key: bucket names never contain recoverable credential material.
 _IDENTITY_SECRET = secrets.token_bytes(32)
-
-
-@dataclass(frozen=True)
-class RateLimitIdentity:
-    """A rate-limit bucket, the peer that owns it, and the pool it lives in."""
-
-    bucket: str
-    owner: str
-    pool: RateLimitPool
 
 
 def _peer_group(ip: str) -> str:
@@ -116,16 +100,12 @@ def is_trusted_request(request: Any) -> bool:
     return _direct_peer_is_trusted_gateway(request)
 
 
-def rate_limit_identity(request: Any, headers: Any = None) -> RateLimitIdentity:
+def rate_limit_identity(request: Any, headers: Any = None) -> str:
     """Return the bucket this request is charged to. See the module docstring."""
     headers = headers if headers is not None else getattr(request, "headers", {})
-    owner = _peer_group(resolve_client_ip(request) or "")
-    if not is_trusted_request(request):
-        return RateLimitIdentity(bucket=owner, owner=owner, pool="untrusted")
-    credential = _credential(headers)
+    peer = _peer_group(resolve_client_ip(request) or "")
+    credential = _credential(headers) if is_trusted_request(request) else None
     if credential is None:
-        return RateLimitIdentity(bucket=owner, owner=owner, pool="trusted")
+        return peer
     digest = hmac.digest(_IDENTITY_SECRET, credential.encode("utf-8", "replace"), "sha256")
-    return RateLimitIdentity(
-        bucket=f"{owner}|cred:{digest.hex()[:32]}", owner=owner, pool="trusted"
-    )
+    return f"{peer}|cred:{digest.hex()[:32]}"
