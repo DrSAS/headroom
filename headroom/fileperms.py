@@ -15,7 +15,6 @@ router) should call these helpers rather than ``sqlite3.connect`` /
 ``Path.write_text`` directly:
 
 * :func:`open_owner_only` — open a log or text file for append or write.
-* :func:`write_private_text` — write a whole text file (licence cache, JSON).
 * :func:`ensure_private_file` — make a path a private regular file *before*
   a library that opens by path (sqlite) touches it.
 * :func:`connect_private_sqlite` — ``sqlite3.connect`` through the above.
@@ -140,21 +139,6 @@ def open_owner_only(
         raise
 
 
-def write_private_text(
-    path: str | os.PathLike[str],
-    text: str,
-    *,
-    encoding: str = "utf-8",
-) -> None:
-    """Replace the contents of *path* with *text*, owner-only.
-
-    For small state files whose contents are sensitive (the licence validation
-    cache, vector-index metadata). Same failure rules as :func:`open_owner_only`.
-    """
-    with open_owner_only(path, "w", encoding=encoding) as fh:
-        fh.write(text)
-
-
 def ensure_private_file(path: str | os.PathLike[str], *, what: str = "file") -> None:
     """Make *path* an owner-only regular file before a by-path opener touches it.
 
@@ -235,37 +219,16 @@ def connect_private_sqlite(
     return conn
 
 
-def private_dir(path: str | os.PathLike[str], *, tighten: bool = False) -> Path:
-    """Create *path* (and missing parents) as a directory for private files.
+def private_dir(path: str | os.PathLike[str]) -> Path:
+    """Create *path* (and missing parents) and make the leaf directory ``0o700``.
 
-    The leaf is created ``0o700``; parents that have to be created get the
-    same mode. With ``tighten=True`` an *existing* leaf directory is narrowed
-    to ``0o700`` as well — use that for a directory that exists only to hold
-    Headroom's sensitive files (the native memory directory), not for a shared
-    workspace root whose mode the operator may have set deliberately. A
-    symlink at the leaf is left alone: the target is not ours to re-permission.
-    Returns the path.
+    For a directory that exists only to hold Headroom's sensitive files (the
+    native memory directory); an existing directory left wider by an earlier
+    run is narrowed. A symlink at the leaf is left alone: the target is not
+    ours to re-permission. Returns the path.
     """
     target = Path(path)
-    if not target.exists():
-        # mkdir's mode is masked by the umask; set it explicitly afterwards on
-        # what we created. Parents created here are ours too.
-        missing: list[Path] = []
-        probe = target
-        while not probe.exists():
-            missing.append(probe)
-            if probe.parent == probe:
-                break
-            probe = probe.parent
-        target.mkdir(parents=True, exist_ok=True)
-        if OWNER_ONLY_SUPPORTED:
-            for created in missing:
-                try:
-                    os.chmod(created, OWNER_ONLY_DIR_MODE)
-                except OSError:
-                    pass
-        return target
-    if tighten and OWNER_ONLY_SUPPORTED and target.is_dir() and not target.is_symlink():
-        if stat.S_IMODE(target.stat().st_mode) != OWNER_ONLY_DIR_MODE:
-            os.chmod(target, OWNER_ONLY_DIR_MODE)
+    target.mkdir(parents=True, exist_ok=True)
+    if OWNER_ONLY_SUPPORTED and not target.is_symlink():
+        os.chmod(target, OWNER_ONLY_DIR_MODE)
     return target

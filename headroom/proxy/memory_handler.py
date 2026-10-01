@@ -244,7 +244,7 @@ class MemoryHandler:
         # it wider): it holds the model's memory files verbatim.
         from headroom import fileperms as _fileperms
 
-        _fileperms.private_dir(self._native_memory_dir, tighten=True)
+        _fileperms.private_dir(self._native_memory_dir)
         logger.info(f"Memory: Native memory directory: {self._native_memory_dir}")
 
     def get_beta_headers(self) -> dict[str, str]:

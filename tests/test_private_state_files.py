@@ -117,28 +117,22 @@ class TestConnectPrivateSqlite:
 
 
 class TestPrivateDir:
-    def test_new_dir_and_missing_parents_are_0700(self, tmp_path):
-        d = tmp_path / "a" / "b" / "memories"
-        fileperms.private_dir(d)
-        assert _mode(d) == 0o700
-        assert _mode(tmp_path / "a") == 0o700
-        assert _mode(tmp_path / "a" / "b") == 0o700
-
-    def test_existing_dir_left_alone_unless_tighten(self, tmp_path):
-        d = tmp_path / "shared"
-        d.mkdir()
-        assert _mode(d) == 0o755
-        fileperms.private_dir(d)
-        assert _mode(d) == 0o755
-        fileperms.private_dir(d, tighten=True)
-        assert _mode(d) == 0o700
+    def test_new_and_existing_dirs_are_0700(self, tmp_path):
+        new = tmp_path / "a" / "memories"
+        fileperms.private_dir(new)
+        assert _mode(new) == 0o700
+        old = tmp_path / "old"
+        old.mkdir()
+        assert _mode(old) == 0o755
+        fileperms.private_dir(old)
+        assert _mode(old) == 0o700
 
     def test_symlinked_dir_is_not_re_permissioned(self, tmp_path):
         target = tmp_path / "target"
         target.mkdir()
         link = tmp_path / "memories"
         link.symlink_to(target)
-        fileperms.private_dir(link, tighten=True)
+        fileperms.private_dir(link)
         assert _mode(target) == 0o755
 
 
@@ -147,7 +141,8 @@ class TestOpenOwnerOnlyWriteMode:
         p = tmp_path / "cache.json"
         p.write_text("old-and-long")
         assert _mode(p) == 0o644
-        fileperms.write_private_text(p, "new")
+        with fileperms.open_owner_only(p, "w") as fh:
+            fh.write("new")
         assert p.read_text() == "new"
         assert _mode(p) == 0o600
 
