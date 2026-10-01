@@ -1,10 +1,10 @@
-"""The oauth2 layer only acts on upstream requests that have authenticated to the proxy.
+"""The oauth2 layer only acts on upstream requests (VAPT tracker 03-F4).
 
-Regression tests for two defects (VAPT tracker 03-F4): the middleware rewrote
-``Authorization`` on *every* HTTP request, so (a) remote clients presenting the
-proxy token as their bearer were refused once oauth2 was enabled, and (b) local
+The middleware rewrote ``Authorization`` on *every* HTTP request, so local
 routes such as ``/health`` minted a token and returned 502 whenever the IdP was
-unreachable.
+unreachable. The end-to-end tests also pin that, with extension middleware
+inside the core's proxy-token gate, a remote client presenting the proxy token
+as its bearer is authenticated before the bearer is replaced.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import logging
 import pytest
 
 from headroom_oauth2 import OAuth2Middleware, install
-from headroom_oauth2.middleware import is_local_route
 
 try:  # only the end-to-end tests need FastAPI; they importorskip the core too
     from fastapi import Request
@@ -23,7 +22,6 @@ except ImportError:  # pragma: no cover
     Request = None  # type: ignore[assignment,misc]
 
 NONLOOPBACK = ("203.0.113.5", 44444)
-LOOPBACK = ("127.0.0.1", 12345)
 
 
 class _Recording:
@@ -141,147 +139,18 @@ def test_upstream_routes_are_injected(path):
     assert _auth_of(app) == b"Bearer TOK"
 
 
-def test_is_local_route_honours_extra_prefixes():
-    assert not is_local_route("/vendor-local/ping")
-    assert is_local_route("/vendor-local/ping", ["/vendor-local/"])
-    assert is_local_route("/p/proj/vendor-local/ping", ["/vendor-local/"])
-
-
-# --- proxy-token awareness -------------------------------------------------------
-
-
-def test_no_proxy_token_configured_injects_for_everyone():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _Cached("TOK"), proxy_token=None)
-    _run(mw, _scope(headers=[]))
-    assert _auth_of(app) == b"Bearer TOK"
-
-
-def test_unauthenticated_remote_caller_is_left_untouched_and_costs_no_mint():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _NeverMint(), proxy_token="s3cr3t")
-    scope = _scope(headers=[(b"x-keep", b"1")])
-    _run(mw, scope)
-    assert app.called  # the proxy's own gate answers it; we do not
-    assert app.scope["headers"] == [(b"x-keep", b"1")]
-
-
-def test_wrong_proxy_token_is_left_untouched_and_costs_no_mint():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _NeverMint(), proxy_token="s3cr3t")
-    _run(mw, _scope(headers=[(b"authorization", b"Bearer nope")]))
-    assert _auth_of(app) == b"Bearer nope"
-
-
-def test_proxy_token_as_bearer_is_accepted_and_replaced_with_upstream_token():
-    """The flow that used to 401: client authenticates with the proxy token in Authorization."""
-    app = _Recording()
-    mw = OAuth2Middleware(app, _Cached("TOK"), proxy_token="s3cr3t")
-    _run(mw, _scope(headers=[(b"authorization", b"Bearer s3cr3t")]))
-    hdrs = dict(app.scope["headers"])
-    assert hdrs[b"authorization"] == b"Bearer TOK"
-    # The proxy credential travels on to the core gate under its explicit header
-    # (which the core strips before the upstream hop), so a gate that runs inside
-    # this layer still authenticates the request.
-    assert hdrs[b"x-headroom-proxy-token"] == b"s3cr3t"
-
-
-def test_loopback_caller_gets_credential_carried_only_if_it_had_one():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _Cached("TOK"), proxy_token="s3cr3t")
-    _run(mw, _scope(headers=[], client=LOOPBACK))
-    hdrs = dict(app.scope["headers"])
-    assert hdrs[b"authorization"] == b"Bearer TOK"
-    # Loopback is exempt at the gate too; the credential is still attached so the
-    # request looks the same to the gate regardless of where this layer sits.
-    assert hdrs[b"x-headroom-proxy-token"] == b"s3cr3t"
-
-
-def test_no_proxy_token_configured_adds_no_header():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _Cached("TOK"), proxy_token=None)
-    _run(mw, _scope(headers=[]))
-    assert b"x-headroom-proxy-token" not in dict(app.scope["headers"])
-
-
-def test_explicit_proxy_token_header_is_accepted_and_preserved():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _Cached("TOK"), proxy_token="s3cr3t")
-    _run(
-        mw,
-        _scope(
-            headers=[
-                (b"x-headroom-proxy-token", b"s3cr3t"),
-                (b"authorization", b"Bearer something-else"),
-            ]
-        ),
-    )
-    hdrs = dict(app.scope["headers"])
-    assert hdrs[b"authorization"] == b"Bearer TOK"
-    assert hdrs[b"x-headroom-proxy-token"] == b"s3cr3t"  # the core strips it before upstream
-
-
-def test_loopback_caller_is_exempt_like_the_core_gate():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _Cached("TOK"), proxy_token="s3cr3t")
-    _run(mw, _scope(headers=[], client=LOOPBACK))
-    assert _auth_of(app) == b"Bearer TOK"
-
-
-def test_non_ascii_bearer_is_refused_not_crashed():
-    app = _Recording()
-    mw = OAuth2Middleware(app, _NeverMint(), proxy_token="s3cr3t")
-    _run(mw, _scope(headers=[(b"authorization", "Bearer s3cr3té".encode("latin-1"))]))
-    assert app.called
-
-
-# --- install() wiring -------------------------------------------------------------
-
-
-def _capture_install(monkeypatch, *, proxy_token_env=None, cfg_token=None, local_paths=None):
+def test_install_log_line_does_not_carry_the_token_url_query(monkeypatch, caplog):
     monkeypatch.setenv("HEADROOM_OAUTH2_TOKEN_URL", "https://idp.example.com/token?client=acme")
     monkeypatch.setenv("HEADROOM_OAUTH2_CLIENT_ID", "c")
     monkeypatch.setenv("HEADROOM_OAUTH2_CLIENT_SECRET", "s")
     monkeypatch.delenv("HEADROOM_OAUTH2_HEADERS", raising=False)
-    if proxy_token_env is None:
-        monkeypatch.delenv("HEADROOM_PROXY_TOKEN", raising=False)
-    else:
-        monkeypatch.setenv("HEADROOM_PROXY_TOKEN", proxy_token_env)
-    if local_paths is None:
-        monkeypatch.delenv("HEADROOM_OAUTH2_LOCAL_PATHS", raising=False)
-    else:
-        monkeypatch.setenv("HEADROOM_OAUTH2_LOCAL_PATHS", local_paths)
-    captured = {}
+    caplog.set_level(logging.INFO, logger="headroom_oauth2")
 
     class App:
         def add_middleware(self, cls, **kw):
-            captured["cls"] = cls
-            captured.update(kw)
+            pass
 
-    cfg = type("Cfg", (), {"backend": "litellm-openai", "proxy_token": cfg_token})()
-    install(App(), cfg)
-    return captured
-
-
-def test_install_passes_config_proxy_token(monkeypatch):
-    cap = _capture_install(monkeypatch, cfg_token="from-config", proxy_token_env="from-env")
-    assert cap["cls"] is OAuth2Middleware
-    assert cap["proxy_token"] == "from-config"  # config wins, same precedence as the core
-
-
-def test_install_falls_back_to_env_proxy_token(monkeypatch):
-    cap = _capture_install(monkeypatch, proxy_token_env="from-env")
-    assert cap["proxy_token"] == "from-env"
-
-
-def test_install_passes_extra_local_paths(monkeypatch):
-    cap = _capture_install(monkeypatch, local_paths="/vendor-local/, /other")
-    assert cap["local_path_prefixes"] == ["/vendor-local/", "/other"]
-
-
-def test_install_log_line_does_not_carry_the_token_url_query(monkeypatch, caplog):
-    caplog.set_level(logging.INFO, logger="headroom_oauth2")
-    _capture_install(monkeypatch)
+    install(App(), type("Cfg", (), {"backend": "litellm-openai"})())
     [record] = [r for r in caplog.records if "auth installed" in r.getMessage()]
     # The logged token_url is exactly scheme://host -- no path, no query.
     assert record.args[0] == "https://idp.example.com"
@@ -333,7 +202,7 @@ def test_remote_client_with_proxy_token_bearer_is_not_refused_when_oauth2_is_ena
 
 
 def test_bearer_proxy_token_survives_replacement_when_gate_runs_inside(monkeypatch):
-    """IdP reachable: the request must clear the core gate even when this layer ran first.
+    """IdP reachable: the gate authenticates the proxy-token bearer, then it is replaced.
 
     Registers a probe route under a non-local path so what reaches the handler is
     exactly what an upstream would have received, without any upstream.
@@ -395,7 +264,7 @@ def test_bearer_proxy_token_survives_replacement_when_gate_runs_inside(monkeypat
             r = c.post("/probe/upstream-like", headers={"Authorization": "Bearer s3cr3t"})
             assert r.status_code == 200, r.text
             assert seen["authorization"] == "Bearer MINTED"  # upstream bearer injected
-            assert seen["proxy_header"] == "s3cr3t"  # proxy credential carried to the gate
+            assert seen["proxy_header"] is None  # the proxy credential is not carried on
             assert mints["n"] == 1
 
             seen.clear()
