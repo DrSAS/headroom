@@ -55,12 +55,6 @@ def test_every_credential_or_account_header_partitions(header: str) -> None:
     assert compute_cache_partition({header: "one"}) != compute_cache_partition({header: "two"})
 
 
-def test_gemini_query_key_partitions() -> None:
-    assert compute_cache_partition({}, query_params={"key": "k1"}) != compute_cache_partition(
-        {}, query_params={"key": "k2"}
-    )
-
-
 def test_non_credential_headers_do_not_fragment_the_cache() -> None:
     base = compute_cache_partition({"x-api-key": "k"})
     noisy = {

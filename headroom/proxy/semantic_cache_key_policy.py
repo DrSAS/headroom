@@ -24,7 +24,6 @@ _PARTITION_KEY = secrets.token_bytes(32)
 _CREDENTIAL_HEADER_RE = re.compile(
     r"(^|[-_])(api[-_]?key|key|token|secret|account|account[-_]id|organization|project)$"
 )
-_CREDENTIAL_QUERY_PARAMS = ("key",)  # Gemini ``?key=``
 _INTERNAL_HEADER_PREFIX = "x-headroom-"
 # Per-request nonces that match the credential shape but identify nothing: a
 # fresh value per call would make every request a unique partition.
@@ -42,7 +41,6 @@ def _is_credential_header(name: str) -> bool:
 def compute_cache_partition(
     headers: Mapping[str, str] | Any,
     *,
-    query_params: Mapping[str, str] | Any = None,
     principal: str | None = None,
 ) -> str:
     """Return the response-cache partition for one caller.
@@ -61,11 +59,6 @@ def compute_cache_partition(
     for name, value in items:
         if value and _is_credential_header(str(name)):
             material.append(("h:" + str(name).lower(), str(value).strip()))
-    if query_params is not None:
-        for name in _CREDENTIAL_QUERY_PARAMS:
-            value = query_params.get(name) if hasattr(query_params, "get") else None
-            if value:
-                material.append(("q:" + name, str(value)))
     if principal:
         material.append(("principal", principal))
     if not material:
@@ -82,12 +75,7 @@ def compute_request_cache_partition(request: Any) -> str:
     from headroom.proxy.identity import resolve_authenticated_principal
 
     headers = getattr(request, "headers", None) or {}
-    query_params = getattr(request, "query_params", None)
-    return compute_cache_partition(
-        headers,
-        query_params=query_params,
-        principal=resolve_authenticated_principal(request),
-    )
+    return compute_cache_partition(headers, principal=resolve_authenticated_principal(request))
 
 
 def strip_cache_control(obj: Any) -> Any:
