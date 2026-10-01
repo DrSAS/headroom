@@ -43,6 +43,8 @@
     "opencode",
     "opencode-deepseek",
     "grok-build",
+    "agent-hooks",
+    "openclaw",
     "mcp",
     "---Configuration---",
     "configuration",
@@ -62,6 +64,8 @@
     "runtime-rollouts",
     "benchmarks",
     "limitations",
+    "---Security---",
+    "security-model",
     "---Help---",
     "errors",
     "troubleshooting"
