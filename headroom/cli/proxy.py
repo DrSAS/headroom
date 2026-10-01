@@ -1288,10 +1288,8 @@ def proxy(
         )
 
     # Stateless mode: suppress TOIN filesystem persistence, and export the flag
-    # so every process this one spawns (multi-worker children, `headroom mcp`
-    # launched from the same shell) and every module that consults
-    # paths.process_is_stateless() before the proxy records it see the same
-    # answer. The env var is what `headroom mcp` honours for its stats file.
+    # so code that runs before the proxy records it (the update check) and
+    # child processes see the same answer as paths.process_is_stateless().
     if is_stateless:
         os.environ["HEADROOM_TOIN_BACKEND"] = "none"
         os.environ["HEADROOM_STATELESS"] = "1"
