@@ -18,19 +18,10 @@ The fix is deliberately *value-based*, not *path-based*:
   Loopback callers and trusted-gateway CIDRs skip the token check, but a loopback
   client that sends the token anyway must not leak it either.
 
-Two layers apply the rule:
-
-1. :class:`ProxyCredentialScrubMiddleware` runs **innermost** — after the
-   security gate and after proxy extensions (oauth2 needs to see the credential
-   to decide whether a request authenticated), immediately before routing. Every
-   handler, backend adapter (LiteLLM, any-llm), WebSocket relay and gateway turn
-   therefore receives a request that no longer carries the token. The names of
-   the removed headers are recorded on ``scope["state"]`` under
-   :data:`SCRUBBED_STATE_KEY` for diagnostics.
-2. :func:`install_upstream_credential_guard` adds an httpx request hook to the
-   shared upstream clients as defence in depth, so a header assembled from
-   anywhere other than the inbound request (configured extras, stored state, a
-   future code path) still cannot carry the token out.
+:class:`ProxyCredentialScrubMiddleware` applies the rule **innermost** — after
+the security gate and after proxy extensions, immediately before routing. Every
+handler, backend adapter (LiteLLM, any-llm), WebSocket relay, gateway turn and
+background poller therefore receives a request that no longer carries the token.
 """
 
 from __future__ import annotations
@@ -43,7 +34,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 PROXY_TOKEN_ENV = "HEADROOM_PROXY_TOKEN"
-SCRUBBED_STATE_KEY = "headroom.proxy_credential_scrubbed"
 
 # A header value longer than this cannot be a bare token or ``Bearer <token>``;
 # skipping it keeps the per-request cost flat for large cookies and the like.
@@ -54,7 +44,7 @@ def resolve_proxy_token(config: Any = None) -> str | None:
     """Return the configured proxy token, or ``None`` when auth is off.
 
     One resolution rule for every consumer (security gate, WebSocket gate, the
-    scrub middleware and the upstream client hook) so they cannot disagree about
+    scrub middleware) so they cannot disagree about
     which token is in force.
     """
     configured = getattr(config, "proxy_token", None) if config is not None else None
@@ -110,44 +100,10 @@ class ProxyCredentialScrubMiddleware:
         if self.token and scope.get("type") in {"http", "websocket"}:
             kept, removed = scrub_header_pairs(list(scope.get("headers") or []), self.token)
             if removed:
-                scope = dict(scope)
-                scope["headers"] = kept
-                state = dict(scope.get("state") or {})
-                state[SCRUBBED_STATE_KEY] = removed
-                scope["state"] = state
+                scope = dict(scope, headers=kept)
                 logger.debug(
                     "event=proxy_credential_scrubbed path=%s headers=%s",
                     scope.get("path"),
                     ",".join(removed),
                 )
         await self.app(scope, receive, send)
-
-
-def install_upstream_credential_guard(client: Any, proxy_token: str | None) -> Any:
-    """Add an httpx request hook that drops any header carrying the proxy token.
-
-    Returns ``client``. A no-op when no token is configured. Logged at WARNING
-    when it fires, because reaching this layer means some code path built
-    upstream headers without going through the inbound scrub.
-    """
-    if not proxy_token:
-        return client
-    token = proxy_token.encode("utf-8")
-
-    async def _drop_proxy_credential(request: Any) -> None:
-        leaking = [
-            name for name, value in request.headers.raw if carries_proxy_credential(value, token)
-        ]
-        for name in leaking:
-            key = name.decode("latin-1")
-            if key in request.headers:
-                del request.headers[key]
-        if leaking:
-            logger.warning(
-                "event=proxy_credential_blocked_upstream host=%s headers=%s",
-                request.url.host,
-                ",".join(n.decode("latin-1").lower() for n in leaking),
-            )
-
-    client.event_hooks.setdefault("request", []).append(_drop_proxy_credential)
-    return client

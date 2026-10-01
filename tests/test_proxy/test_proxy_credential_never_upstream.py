@@ -22,10 +22,8 @@ from fastapi.testclient import TestClient
 
 from headroom.proxy.loopback_guard import require_loopback
 from headroom.proxy.proxy_credential import (
-    SCRUBBED_STATE_KEY,
     ProxyCredentialScrubMiddleware,
     carries_proxy_credential,
-    install_upstream_credential_guard,
     scrub_header_pairs,
 )
 from headroom.proxy.server import ProxyConfig, create_app
@@ -253,12 +251,11 @@ def test_empty_token_never_matches() -> None:
 
 
 @pytest.mark.asyncio
-async def test_websocket_handshake_is_scrubbed_and_recorded() -> None:
+async def test_websocket_handshake_is_scrubbed() -> None:
     seen: dict[str, Any] = {}
 
     async def inner(scope, receive, send):
         seen["headers"] = scope["headers"]
-        seen["state"] = scope.get("state", {})
 
     mw = ProxyCredentialScrubMiddleware(inner, proxy_token=TOKEN)
     await mw(
@@ -274,31 +271,3 @@ async def test_websocket_handshake_is_scrubbed_and_recorded() -> None:
         None,
     )
     assert seen["headers"] == [(b"x-api-key", PROVIDER_KEY.encode())]
-    assert seen["state"][SCRUBBED_STATE_KEY] == ["authorization"]
-
-
-@pytest.mark.asyncio
-async def test_upstream_client_guard_drops_token_from_any_header() -> None:
-    """Defence in depth: headers built from anywhere but the inbound request."""
-    sent: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        return httpx.Response(200)
-
-    client = install_upstream_credential_guard(
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)), TOKEN
-    )
-    async with client:
-        await client.get(
-            "https://upstream.example/v1/x",
-            headers={
-                "authorization": f"Bearer {TOKEN}",
-                "x-goog-api-key": TOKEN,
-                "x-keep": "value",
-            },
-        )
-    headers = {k.lower(): v for k, v in sent[0].headers.items()}
-    assert "authorization" not in headers
-    assert "x-goog-api-key" not in headers
-    assert headers["x-keep"] == "value"

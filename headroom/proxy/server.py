@@ -178,11 +178,7 @@ from headroom.proxy.project_context import (
     strip_project_path_prefix,
 )
 from headroom.proxy.prometheus_metrics import PrometheusMetrics  # noqa: F401
-from headroom.proxy.proxy_credential import (
-    ProxyCredentialScrubMiddleware,
-    install_upstream_credential_guard,
-    resolve_proxy_token,
-)
+from headroom.proxy.proxy_credential import ProxyCredentialScrubMiddleware, resolve_proxy_token
 from headroom.proxy.rate_limiter import TokenBucketRateLimiter  # noqa: F401
 from headroom.proxy.request_body_limit import RequestBodyLimitMiddleware
 from headroom.proxy.request_logger import RequestLogger  # noqa: F401
@@ -1992,23 +1988,15 @@ class HeadroomProxy(
         # honour a pin at all — a proxy resolves the target itself, on its own
         # network. Operator-configured upstreams have no pin and are untouched,
         # so trust_env, limits, HTTP/2 and connection reuse are unchanged.
-        # The credential guard is defence in depth behind the inbound scrub
-        # (ProxyCredentialScrubMiddleware): no upstream request made through the
-        # shared clients may carry HEADROOM_PROXY_TOKEN in any header.
-        _proxy_token = resolve_proxy_token(self.config)
-        self.http_client = install_upstream_credential_guard(
-            install_upstream_pinning(httpx.AsyncClient(http2=_http2, **_client_kwargs)),
-            _proxy_token,
+        self.http_client = install_upstream_pinning(
+            httpx.AsyncClient(http2=_http2, **_client_kwargs)
         )
         # Reuse the primary client when HTTP/2 is already off; otherwise keep a
         # dedicated HTTP/1.1 client for ChatGPT passthrough.
         self.http_client_h1 = (
             self.http_client
             if not _http2
-            else install_upstream_credential_guard(
-                install_upstream_pinning(httpx.AsyncClient(http2=False, **_client_kwargs)),
-                _proxy_token,
-            )
+            else install_upstream_pinning(httpx.AsyncClient(http2=False, **_client_kwargs))
         )
         logger.info("Headroom Proxy started (version %s)", __version__)
         logger.info(f"Optimization: {'ENABLED' if self.config.optimize else 'DISABLED'}")
