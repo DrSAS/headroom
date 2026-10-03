@@ -428,17 +428,38 @@ _CCR_RETRIEVE_TOOL_NAME = "headroom_retrieve"
 # `headroom_retrieve(` inside a string (e.g. a shell command being exec'd)
 # over-protects that one output; losing compression is cheap, losing retrieved
 # bytes is not.
+#
+# Matching runs on decoded script text: the OpenAI wire hands the payload over
+# JSON-encoded, where a real newline between the callee and `(` arrives as the
+# two characters `\n` and a raw-text scan misses the call.
 _ORCHESTRATOR_WRAPPER_NAMES = frozenset({"execute", "exec", "functions.exec"})
 
 # JavaScript call expressions inside a wrapper payload: `headroom_retrieve(`,
 # `tools.headroom.headroom_retrieve(`, plus bracket access
-# `tools["headroom_retrieve"](` / `tools['mcp__headroom__headroom_retrieve'](`
-# (the OpenAI wire hands the payload over JSON-encoded, so the bracket quotes
-# arrive escaped: `tools[\"headroom_retrieve\"](`).
+# `tools["headroom_retrieve"](` / `tools['mcp__headroom__headroom_retrieve'](`.
+# Decoded script text carries unescaped quotes; the escaped form of a raw
+# payload is tolerated too.
 _JS_CALL_CHAIN_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(")
 _JS_BRACKET_KEY_RE = re.compile(
     r"""\[\s*\\?(?:"([^"\n\\]{1,200})\\?"|'([^'\n\\]{1,200})\\?')\s*\]\s*\("""
 )
+
+
+def _decoded_strings(value: Any) -> list[str]:
+    """Every string nested in a decoded payload (dicts and lists walk
+    through); scalars contribute nothing."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        items: Iterable[Any] = value.values()
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        return []
+    strings: list[str] = []
+    for item in items:
+        strings.extend(_decoded_strings(item))
+    return strings
 
 
 def _orchestrator_invokes_retrieve(name: str, arguments: Any) -> bool:
@@ -446,18 +467,26 @@ def _orchestrator_invokes_retrieve(name: str, arguments: Any) -> bool:
 
     See the comment above ``_ORCHESTRATOR_WRAPPER_NAMES``. ``arguments`` is the
     model-authored call payload: JSON text on the OpenAI wire, a decoded dict on
-    the Anthropic wire. A non-string value that is not a dict fails closed (the
-    call keeps its wrapper name).
+    the Anthropic wire, raw JavaScript for a custom_tool_call. JSON text is
+    decoded before matching so a script newline is seen as a real newline. Any
+    other value fails closed (the call keeps its wrapper name).
     """
     if name not in _ORCHESTRATOR_WRAPPER_NAMES:
         return False
+    texts: list[str]
     if isinstance(arguments, str):
-        text = arguments
+        decoded = _load_json_value(arguments)
+        if isinstance(decoded, dict):
+            texts = _decoded_strings(decoded)
+        elif decoded is None:
+            # Not JSON: a raw JavaScript custom_tool_call payload.
+            texts = [arguments]
+        else:
+            # A JSON scalar, string or array: no orchestrator payload shape.
+            return False
     elif isinstance(arguments, dict):
-        text = json.dumps(arguments, default=str)
+        texts = _decoded_strings(arguments)
     else:
-        return False
-    if _CCR_RETRIEVE_TOOL_NAME not in text:
         return False
 
     def _names_retrieve(candidate: str) -> bool:
@@ -466,13 +495,16 @@ def _orchestrator_invokes_retrieve(name: str, arguments: Any) -> bool:
         # the usual mcp__<server>__ aliases to it.
         return is_tool_excluded(candidate.rsplit(".", 1)[-1], (_CCR_RETRIEVE_TOOL_NAME,))
 
-    for match in _JS_CALL_CHAIN_RE.finditer(text):
-        if _names_retrieve(match.group(1)):
-            return True
-    for match in _JS_BRACKET_KEY_RE.finditer(text):
-        key = next((group for group in match.groups() if group), "")
-        if key and _names_retrieve(key):
-            return True
+    for text in texts:
+        if _CCR_RETRIEVE_TOOL_NAME not in text:
+            continue
+        for match in _JS_CALL_CHAIN_RE.finditer(text):
+            if _names_retrieve(match.group(1)):
+                return True
+        for match in _JS_BRACKET_KEY_RE.finditer(text):
+            key = next(group for group in match.groups() if group)
+            if _names_retrieve(key):
+                return True
     return False
 
 

@@ -64,6 +64,12 @@ RETRIEVE_CODE = (
     'const r = await tools.headroom.headroom_retrieve({hash: "abc123def456"});\nreturn r;'
 )
 NON_RETRIEVE_CODE = 'const r = await tools.bash.bash({command: "ls"});\nreturn r;'
+# A real newline between the callee and its `(`. On the OpenAI wire the payload
+# is JSON, so this arrives as the two escaped characters `\n` and a scan of the
+# raw JSON text misses it; the call must be recognized on the decoded script.
+RETRIEVE_CODE_MULTILINE = (
+    'const r = await tools.headroom.headroom_retrieve\n({hash: "abc123def456"});\nreturn r;'
+)
 
 
 class TestOrchestratorUnwrap:
@@ -94,6 +100,60 @@ class TestOrchestratorUnwrap:
         assert unwrap_tool_call("execute", json.dumps({"code": "// see headroom_retrieve"}))[0] == (
             "execute"
         )
+
+    def test_json_encoded_newline_before_call_resolves(self):
+        """The OpenAI wire JSON-encodes the payload, so the script's real
+        newline arrives as the two characters ``\\n``; resolving must happen on
+        the decoded script text, not on the raw JSON text (#3915 review)."""
+        code = 'const r = await tools.headroom.headroom_retrieve\n({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_json_encoded_tab_before_call_resolves(self):
+        code = 'const r = await tools.headroom.headroom_retrieve\t({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_json_encoded_newline_before_bracket_call_resolves(self):
+        code = 'const r = await tools["headroom_retrieve"]\n({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_anthropic_dict_payload_with_newline_resolves(self):
+        """The Anthropic wire hands over a decoded dict; it must be scanned
+        directly, without a json.dumps round-trip re-encoding the newline."""
+        args = {"code": 'const r = await tools.headroom.headroom_retrieve\n({hash: "abc"});'}
+        assert unwrap_tool_call("execute", args)[0] == "headroom_retrieve"
+
+    def test_nested_containers_in_dict_payload_resolve(self):
+        args = {"meta": {"attempt": 1}, "calls": [{"code": RETRIEVE_CODE_MULTILINE}]}
+        assert unwrap_tool_call("execute", args)[0] == "headroom_retrieve"
+
+    def test_raw_javascript_payload_with_newline_resolves(self):
+        """A custom_tool_call payload that is not JSON is scanned as-is."""
+        code = 'const r = await tools.headroom.headroom_retrieve\n({hash: "abc"});'
+        assert unwrap_tool_call("execute", code)[0] == "headroom_retrieve"
+
+    def test_string_values_without_the_name_are_skipped(self):
+        args = {"note": "no tool call here", "code": RETRIEVE_CODE_MULTILINE}
+        assert unwrap_tool_call("execute", args)[0] == "headroom_retrieve"
+
+    def test_dict_payload_without_string_scripts_keeps_name(self):
+        args = {"code": 42, "meta": {"attempt": 1}, "flags": [True, None]}
+        assert unwrap_tool_call("execute", args)[0] == "execute"
+
+    def test_non_string_non_dict_arguments_fail_closed(self):
+        for args in (None, 42, ["headroom_retrieve("]):
+            assert unwrap_tool_call("execute", args)[0] == "execute"
+
+    def test_json_scalar_arguments_fail_closed(self):
+        assert unwrap_tool_call("execute", "42")[0] == "execute"
+
+    def test_unrelated_call_chain_keeps_name(self):
+        # The mention satisfies the substring prefilter but no chain resolves.
+        code = "// see headroom_retrieve docs\nrun(1);"
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "execute"
+
+    def test_unrelated_bracket_access_keeps_name(self):
+        code = '// see headroom_retrieve docs\ntools["other"]();'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "execute"
 
 
 class TestOrchestratorWrapperCcrRetrieveExemption:
@@ -128,6 +188,76 @@ class TestOrchestratorWrapperCcrRetrieveExemption:
         tool_msg = next(m for m in result.messages if m.get("role") == "tool")
         assert tool_msg["content"] == content
         assert "router:excluded:ccr_retrieve" in result.transforms_applied
+
+    def test_execute_wrapper_multiline_retrieve_result_not_recompressed(self):
+        """Codex code-mode shapes can break the call line before the `(`; the
+        decoded script must still resolve and keep the exemption."""
+        content = _big_retrieve_json()
+        router = ContentRouter(ContentRouterConfig(min_section_tokens=10))
+        tokenizer = _get_tokenizer()
+
+        messages = _orchestrator_messages("execute", RETRIEVE_CODE_MULTILINE, content)
+        result = router.apply(messages, tokenizer)
+
+        tool_msg = next(m for m in result.messages if m.get("role") == "tool")
+        assert tool_msg["content"] == content, (
+            "multiline headroom_retrieve call behind the execute wrapper was recompressed "
+            "(unresolvable retrieval loop, #3563)"
+        )
+        assert "<<ccr:" not in tool_msg["content"]
+        assert "router:excluded:ccr_retrieve" in result.transforms_applied
+
+    def test_anthropic_execute_wrapper_multiline_retrieve_not_recompressed(self):
+        """Anthropic-shape orchestrator call: the tool_use input is a decoded
+        dict carrying a real newline, with no JSON text to scan."""
+        content = _big_retrieve_json()
+        router = ContentRouter(ContentRouterConfig(min_section_tokens=10))
+        tokenizer = _get_tokenizer()
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_exec_multiline",
+                        "name": "execute",
+                        "input": {"code": RETRIEVE_CODE_MULTILINE},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_exec_multiline",
+                        "content": content,
+                    }
+                ],
+            },
+        ]
+        result = router.apply(messages, tokenizer)
+
+        tool_result_block = result.messages[1]["content"][0]
+        assert tool_result_block["content"] == content
+        assert "<<ccr:" not in tool_result_block["content"]
+        assert "router:excluded:ccr_retrieve" in result.transforms_applied
+
+    def test_execute_wrapper_multiline_without_retrieve_still_compressed(self):
+        """Negative control: a multiline script that does not call the
+        retrieval tool keeps the wrapper name and stays compressible."""
+        content = _big_retrieve_json()
+        router = ContentRouter(ContentRouterConfig(min_section_tokens=10))
+        tokenizer = _get_tokenizer()
+
+        code = "const r = await tools.bash.bash\n({command: 'ls'});\nreturn r;"
+        messages = _orchestrator_messages("execute", code, content)
+        result = router.apply(messages, tokenizer)
+
+        tool_msg = next(m for m in result.messages if m.get("role") == "tool")
+        assert "router:excluded:ccr_retrieve" not in result.transforms_applied
+        assert tool_msg["content"] != content or result.tokens_after < result.tokens_before
 
     def test_execute_wrapper_without_retrieve_call_still_compressed(self):
         """The exemption stays narrow: an execute call that does not invoke the
