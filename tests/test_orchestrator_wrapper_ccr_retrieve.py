@@ -155,6 +155,41 @@ class TestOrchestratorUnwrap:
         code = '// see headroom_retrieve docs\ntools["other"]();'
         assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "execute"
 
+    def test_optional_invocation_resolves(self):
+        """`retrieve?.(...)` is a valid JavaScript call; its bytes need the
+        exemption like a plain invocation (#3915 review)."""
+        code = 'const r = await tools.headroom.headroom_retrieve?.({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_optional_property_access_resolves(self):
+        code = 'const r = await tools?.headroom.headroom_retrieve({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_optional_bracket_invocation_resolves(self):
+        code = 'const r = await tools["headroom_retrieve"]?.({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_optional_access_around_bracket_call_resolves(self):
+        code = 'const r = await tools?.["headroom_retrieve"]?.({hash: "abc"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "headroom_retrieve"
+
+    def test_optional_chain_without_retrieve_keeps_name(self):
+        code = 'const r = await tools?.bash.bash?.({command: "ls"});'
+        assert unwrap_tool_call("execute", json.dumps({"code": code}))[0] == "execute"
+
+    def test_hermes_bridge_over_orchestrator_retrieve_resolves(self):
+        """`tool_call` wrapping an `execute` that runs the retrieval tool: the
+        name must resolve through the nested orchestrator, not stop at
+        `execute` (#3915 review)."""
+        args = json.dumps({"name": "execute", "arguments": {"code": RETRIEVE_CODE}})
+        name, inner = unwrap_tool_call("tool_call", args)
+        assert name == "headroom_retrieve"
+        assert inner == {"code": RETRIEVE_CODE}
+
+    def test_hermes_bridge_over_orchestrator_without_retrieve_keeps_name(self):
+        args = {"name": "execute", "arguments": {"code": NON_RETRIEVE_CODE}}
+        assert unwrap_tool_call("tool_call", args)[0] == "execute"
+
 
 class TestOrchestratorWrapperCcrRetrieveExemption:
     def test_execute_wrapper_retrieve_result_not_recompressed(self):
@@ -272,3 +307,55 @@ class TestOrchestratorWrapperCcrRetrieveExemption:
         tool_msg = next(m for m in result.messages if m.get("role") == "tool")
         assert "router:excluded:ccr_retrieve" not in result.transforms_applied
         assert tool_msg["content"] != content or result.tokens_after < result.tokens_before
+
+    def test_hermes_bridge_over_execute_retrieve_result_not_recompressed(self):
+        """A Hermes `tool_call` over an `execute` running the retrieval tool:
+        the paired output must keep the exemption (nested wrapper, #3915
+        review)."""
+        content = _big_retrieve_json()
+        router = ContentRouter(ContentRouterConfig(min_section_tokens=10))
+        tokenizer = _get_tokenizer()
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_ccr_hermes",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_call",
+                            "arguments": json.dumps(
+                                {"name": "execute", "arguments": {"code": RETRIEVE_CODE}}
+                            ),
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_ccr_hermes", "content": content},
+        ]
+        result = router.apply(messages, tokenizer)
+
+        tool_msg = next(m for m in result.messages if m.get("role") == "tool")
+        assert tool_msg["content"] == content, (
+            "nested Hermes/execute retrieval result was recompressed "
+            "(unresolvable retrieval loop, #3563)"
+        )
+        assert "<<ccr:" not in tool_msg["content"]
+        assert "router:excluded:ccr_retrieve" in result.transforms_applied
+
+    def test_execute_wrapper_optional_call_retrieve_not_recompressed(self):
+        """Optional-chaining invocation (`retrieve?.(...)`) keeps the exemption
+        through the router (#3915 review)."""
+        content = _big_retrieve_json()
+        router = ContentRouter(ContentRouterConfig(min_section_tokens=10))
+        tokenizer = _get_tokenizer()
+
+        code = 'const r = await tools.headroom.headroom_retrieve?.({hash: "abc"});\nreturn r;'
+        messages = _orchestrator_messages("execute", code, content)
+        result = router.apply(messages, tokenizer)
+
+        tool_msg = next(m for m in result.messages if m.get("role") == "tool")
+        assert tool_msg["content"] == content
+        assert "router:excluded:ccr_retrieve" in result.transforms_applied

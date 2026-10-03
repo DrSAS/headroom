@@ -437,11 +437,17 @@ _ORCHESTRATOR_WRAPPER_NAMES = frozenset({"execute", "exec", "functions.exec"})
 # JavaScript call expressions inside a wrapper payload: `headroom_retrieve(`,
 # `tools.headroom.headroom_retrieve(`, plus bracket access
 # `tools["headroom_retrieve"](` / `tools['mcp__headroom__headroom_retrieve'](`.
+# Optional chaining counts as an invocation too -- `headroom_retrieve?.()`,
+# `tools?.headroom.headroom_retrieve(...)`, `tools["headroom_retrieve"]?.()`
+# -- since the tool still runs when present and its bytes need the exemption.
 # Decoded script text carries unescaped quotes; the escaped form of a raw
 # payload is tolerated too.
-_JS_CALL_CHAIN_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(")
+_JS_CALL_CHAIN_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*)\s*(?:\?\.)?\s*\("
+)
 _JS_BRACKET_KEY_RE = re.compile(
-    r"""\[\s*\\?(?:"([^"\n\\]{1,200})\\?"|'([^'\n\\]{1,200})\\?')\s*\]\s*\("""
+    r"""\[\s*\\?(?:"([^"\n\\]{1,200})\\?"|'([^'\n\\]{1,200})\\?')\s*\]"""
+    r"""\s*(?:\?\.)?\s*\("""
 )
 
 
@@ -515,7 +521,9 @@ def unwrap_tool_call(name: str, arguments: Any) -> tuple[str, Any]:
     deferred ``tool_call`` bridge (see comment above), and an orchestrator
     wrapper (``execute`` / ``exec`` / ``functions.exec``) whose payload invokes
     the retrieval tool -- the latter reports the retrieval tool's own name so
-    its result keeps the ccr_retrieve exemption (#3563).
+    its result keeps the ccr_retrieve exemption (#3563). A Hermes bridge over
+    an orchestrator call (``tool_call`` -> ``execute`` -> script) resolves
+    through that same orchestrator rule.
 
     Non-wrapper names pass through with their arguments unchanged. A batch
     resolves when every entry names the same tool (Hermes rejects multi-local
@@ -555,6 +563,11 @@ def unwrap_tool_call(name: str, arguments: Any) -> tuple[str, Any]:
     # Per-call arguments are only meaningful for a single call; a batch keeps
     # the wrapper payload so nothing downstream reads one entry as the whole.
     real_arguments = entries[0].get("arguments") if len(entries) == 1 else arguments
+    if _orchestrator_invokes_retrieve(real_name, real_arguments):
+        # Hermes bridge over an orchestrator wrapper (`tool_call` -> `execute`
+        # -> script): the effective call is the orchestrator's, so its
+        # retrieval check decides the name; the bridge alone is never exempted.
+        return _CCR_RETRIEVE_TOOL_NAME, real_arguments
     return real_name, real_arguments
 
 
